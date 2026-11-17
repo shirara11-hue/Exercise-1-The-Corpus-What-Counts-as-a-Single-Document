@@ -1,0 +1,109 @@
+import json
+import random
+from datasets import load_dataset
+
+# ===== הגדרות =====
+HF_DATASET = "BeIR/fiqa"
+HF_CONFIG  = "corpus"
+SPLIT      = "corpus"
+TEXT_COL   = "text"
+TITLE_COL  = "title"  # שונה ל-title מכיוון שב-fiqa יש כותרות
+MAX_DOCS   = 3000
+# ===================
+
+def load_my_corpus():
+    ds = load_dataset(HF_DATASET, HF_CONFIG, split=SPLIT)
+    print("עמודות:", ds.column_names, "| שורות:", f"{len(ds):,}")
+
+    if TEXT_COL not in ds.column_names:
+        raise KeyError(f"אין עמודה '{TEXT_COL}'. בחרו אחת מ: {ds.column_names}")
+
+    ds = ds.shuffle(seed=42).select(range(min(MAX_DOCS, len(ds))))
+    docs = []
+
+    for i, row in enumerate(ds):
+        text = row[TEXT_COL]
+        if not isinstance(text, str) or not text.strip():
+            continue
+        title = str(row[TITLE_COL]) if TITLE_COL and row[TITLE_COL] else ""
+        # שמירת המזהה המקורי או מזהה רץ
+        doc_id = str(row.get("_id", f"doc{i:05d}"))
+        docs.append({"id": doc_id, "title": title, "text": text})
+
+    return docs
+
+my_docs = load_my_corpus()
+print(f"{len(my_docs):,} מסמכים נטענו")
+print("-" * 60)
+print(random.choice(my_docs)["text"][:800])
+
+# --- 1. ייצוא לקובץ corpus.jsonl ---
+with open("corpus.jsonl", "w", encoding="utf-8") as f:
+    for doc in my_docs:
+        f.write(json.dumps(doc, ensure_ascii=False) + "\n")
+
+print("\nהקובץ corpus.jsonl נוצר בהצלחה!")
+
+
+# שתי ההגדרות שלכם. ברירת המחדל: A = השורה כולה, B = כל פסקה. שנו לפי הקורפוס!
+def my_units_A(doc):
+    return [{"id": doc["id"], "title": doc["title"], "text": doc["text"].strip()}]
+
+def my_units_B(doc, min_tokens=8):
+    parts = re.split(r"\n\s*\n", doc["text"])
+    return [{"id": f"{doc['id']}_p{k}", "title": doc["title"], "text": p.strip()}
+            for k, p in enumerate(parts) if len(tokenize(p)) >= min_tokens]
+
+my_A = build(my_docs, my_units_A)
+my_B = build(my_docs, my_units_B)
+pd.DataFrame([corpus_stats(my_A, "A"), corpus_stats(my_B, "B")])
+
+# שמירה: בחרו איזו הגדרה נכנסת לקורפוס, ניקוי בסיסי, ו-300 מסמכים לפחות
+CHOSEN = my_A            # או my_B
+N_KEEP = 300
+
+def clean(text):
+    text = re.sub(r"<[^>]+>", " ", text)       # תגיות HTML
+    text = re.sub(r"\s+", " ", text)            # רווחים כפולים ושורות
+    return text.strip()
+
+seen, final = set(), []
+for d in CHOSEN:
+    t = clean(d["text"])
+    if len(tokenize(t)) >= 5 and t not in seen:   # בלי ריקים ובלי כפילויות
+        seen.add(t)
+        final.append({**d, "text": t})
+
+final = final[:N_KEEP]
+with open("corpus.jsonl", "w", encoding="utf-8") as f:
+    for d in final:
+        f.write(json.dumps(d, ensure_ascii=False) + "\n")
+
+print(f"נשמרו {len(final)} מסמכים ב-corpus.jsonl")
+if len(final) < N_KEEP:
+    print("⚠️ פחות מ-300 — הגדילו את MAX_DOCS או בחרו הגדרה אחרת")
+
+# הורדה למחשב → ואז GitHub Desktop: להעתיק לתיקיית הרפו, commit, push
+from google.colab import files
+files.download("corpus.jsonl")
+
+import re
+
+# סריקת הקורפוס למציאת תווים שנמחקו או מילים שנענשו בצינור
+patterns = [
+    (r'\b\d+k\b', "מספר שנחתך (למשל 401k)"),
+    (r'\b10-[kk]\b', "דוח כספי 10-K"),
+    (r'\b[a-z]+&[a-z]+\b', "תו & שנמחק (למשל AT&T)"),
+    (r'\$\d+', "סכום כספי שאיבד את הדולר והמספר"),
+]
+
+print("=== דוגמאות מתוך הקורפוס שלך (my_docs) ===")
+for doc in my_docs:
+    text = doc["text"]
+    for pat, desc in patterns:
+        match = re.search(pat, text, re.IGNORECASE)
+        if match:
+            print(f"סוג: {desc}")
+            print(f"טקסט מקורי: ...{text[max(0, match.start()-20):match.end()+20]}...")
+            print("-" * 50)
+            break
